@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: lsplash-ai
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: IMAGE_PROVIDER
+        value: pollinations
