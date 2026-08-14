@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lsplash AI — generate, ask, collect</title>
+    <meta name="description" content="Write a prompt, get an image, keep it in a searchable gallery." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+  </head>
+  <body>
+    <div class="orbfield" aria-hidden="true">
+      <div class="orb orb--1"></div>
+      <div class="orb orb--2"></div>
+      <div class="orb orb--3"></div>
+    </div>
+
+    <header class="topbar">
+      <a class="wordmark" href="/">
+        <span class="wordmark__drop" aria-hidden="true"></span>
+        lsplash<span class="wordmark__ai">ai</span>
+      </a>
+      <nav class="topbar__nav" id="topbarNav">
+        <a href="#gallery">Gallery</a>
+        <button id="openChat" class="btn btn--ghost" type="button">Ask</button>
+        <span class="account" id="account" hidden>
+          <span class="account__email" id="accountEmail"></span>
+          <button id="logoutBtn" class="btn btn--ghost btn--sm" type="button">Log out</button>
+        </span>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="eyebrow">Prompt in, picture out</p>
+        <h1 class="hero__title">
+          Every image starts<br />as a <em>splash</em> of language.
+        </h1>
+
+        <form id="generateForm" class="basin" autocomplete="off">
+          <label class="sr-only" for="prompt">Describe the image you want</label>
+          <textarea
+            id="prompt"
+            name="prompt"
+            rows="2"
+            maxlength="800"
+            placeholder="A greenhouse flooded with orange light, shot on expired film"
+            required
+          ></textarea>
+          <div class="basin__foot">
+            <div class="chips" id="chips">
+              <button type="button" class="chip">ink bleeding through rice paper</button>
+              <button type="button" class="chip">a lighthouse in heavy fog, 6am</button>
+              <button type="button" class="chip">brutalist library, warm dust</button>
+            </div>
+            <button id="generateBtn" class="btn btn--solid" type="submit">
+              <span class="btn__label">Generate</span>
+              <span class="ripple" aria-hidden="true"></span>
+            </button>
+          </div>
+        </form>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="gallery" id="gallery">
+        <div class="gallery__head">
+          <h2>Gallery</h2>
+          <label class="search">
+            <span class="sr-only">Search prompts</span>
+            <input id="search" type="search" placeholder="Search prompts" />
+          </label>
+        </div>
+        <div class="grid" id="grid"></div>
+        <p class="empty" id="empty">Nothing here yet. Generate something above.</p>
+      </section>
+    </main>
+
+    <aside class="drawer" id="drawer" aria-hidden="true">
+      <div class="drawer__head">
+        <h2>Ask Lsplash</h2>
+        <button id="closeChat" class="btn btn--ghost" type="button">Close</button>
+      </div>
+      <div class="thread" id="thread">
+        <div class="msg msg--bot">Tell me what you're picturing and I'll turn it into a sharper prompt.</div>
+      </div>
+      <form id="chatForm" class="composer" autocomplete="off">
+        <label class="sr-only" for="chatInput">Message</label>
+        <input id="chatInput" type="text" placeholder="Ask a question" required />
+        <button class="btn btn--solid btn--sm" type="submit">Send</button>
+      </form>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <footer class="footer">
+      <span>Lsplash AI</span>
+      <span class="mono">running on Render</span>
+    </footer>
+
+    <div class="gate" id="authGate" hidden>
+      <div class="gate__card">
+        <p class="eyebrow">Sign in</p>
+        <h2 class="gate__title">One step before you splash</h2>
+        <p class="gate__sub">Sign in to generate images and keep your own gallery.</p>
+
+        <div id="googleSignInDiv" class="gate__google"></div>
+
+        <div class="gate__divider"><span>or</span></div>
+
+        <form id="otpRequestForm" class="gate__form">
+          <label class="sr-only" for="otpEmail">Email</label>
+          <input id="otpEmail" type="email" placeholder="you@email.com" required />
+          <button class="btn btn--solid" type="submit">Send code</button>
+        </form>
+
+        <form id="otpVerifyForm" class="gate__form" hidden>
+          <label class="sr-only" for="otpCode">6-digit code</label>
+          <input id="otpCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456" required />
+          <button class="btn btn--solid" type="submit">Verify</button>
+        </form>
+
+        <p class="gate__status" id="gateStatus" role="status" aria-live="polite"></p>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
