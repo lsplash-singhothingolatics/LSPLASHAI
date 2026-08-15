@@ -21,6 +21,8 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "dev-secret-change-me-in-pr
 const DATABASE_URL = process.env.DATABASE_URL;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const APP_URL = process.env.APP_URL || "https://lsplash-ai.onrender.com";
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const RESEND_FROM = process.env.RESEND_FROM || "Lsplash AI <onboarding@resend.dev>";
@@ -50,6 +52,7 @@ async function initDb() {
       id SERIAL PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
       google_id TEXT UNIQUE,
+      github_id TEXT UNIQUE,
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
@@ -69,6 +72,8 @@ async function initDb() {
       created_at TIMESTAMPTZ DEFAULT now()
     );
   `);
+  // Add github_id to existing installs that predate GitHub sign-in.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id TEXT UNIQUE;`);
   console.log("Database ready.");
 }
 
@@ -123,6 +128,16 @@ async function findOrCreateUserByEmail(email) {
   return rows[0];
 }
 
+async function findOrCreateUserByGithub(githubId, email) {
+  const { rows } = await pool.query(
+    `INSERT INTO users (email, github_id) VALUES ($1, $2)
+     ON CONFLICT (email) DO UPDATE SET github_id = EXCLUDED.github_id
+     RETURNING id, email`,
+    [email, githubId]
+  );
+  return rows[0];
+}
+
 async function findOrCreateUserByGoogle(googleId, email) {
   const { rows } = await pool.query(
     `INSERT INTO users (email, google_id) VALUES ($1, $2)
@@ -170,7 +185,11 @@ async function sendOtpEmail(email, code) {
 const GOOGLE_REDIRECT_URI = `${APP_URL}/auth/google/callback`;
 
 app.get("/api/config", (_req, res) => {
-  res.json({ googleEnabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET), dbConfigured: Boolean(pool) });
+  res.json({
+    googleEnabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET),
+    githubEnabled: Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET),
+    dbConfigured: Boolean(pool),
+  });
 });
 
 app.get("/auth/google", (req, res) => {
@@ -237,6 +256,84 @@ app.get("/auth/google/callback", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.redirect("/?auth_error=google_failed");
+  }
+});
+
+/* ------------------------------------------------------------- github --- */
+
+app.get("/auth/github", (req, res) => {
+  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+    return res.status(503).send("GitHub sign-in isn't configured yet.");
+  }
+  const state = randomBytes(16).toString("hex");
+  res.cookie("gh_state", state, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    maxAge: 10 * 60 * 1000,
+  });
+
+  const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: `${APP_URL}/auth/github/callback`,
+    scope: "read:user user:email",
+    state,
+    allow_signup: "true",
+  });
+  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+});
+
+app.get("/auth/github/callback", async (req, res) => {
+  const { code, state, error } = req.query;
+  const cookieState = req.cookies?.gh_state;
+
+  if (error) return res.redirect(`/?auth_error=${encodeURIComponent(String(error))}`);
+  if (!state || !cookieState || String(state) !== String(cookieState)) {
+    return res.redirect("/?auth_error=bad_state");
+  }
+  res.clearCookie("gh_state");
+
+  if (!pool) return res.redirect("/?auth_error=no_database");
+
+  try {
+    const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code: String(code),
+        redirect_uri: `${APP_URL}/auth/github/callback`,
+      }),
+    });
+    if (!tokenRes.ok) throw new Error(`Token exchange failed: ${await tokenRes.text()}`);
+    const tokens = await tokenRes.json();
+    if (!tokens.access_token) throw new Error(`No access token: ${JSON.stringify(tokens)}`);
+
+    const authHeader = { authorization: `Bearer ${tokens.access_token}`, "user-agent": "lsplash-ai" };
+
+    const profileRes = await fetch("https://api.github.com/user", { headers: authHeader });
+    if (!profileRes.ok) throw new Error("Could not fetch GitHub profile.");
+    const profile = await profileRes.json();
+
+    // GitHub may hide the primary email on the profile, so ask the emails endpoint.
+    let email = profile.email;
+    if (!email) {
+      const emailsRes = await fetch("https://api.github.com/user/emails", { headers: authHeader });
+      if (emailsRes.ok) {
+        const emails = await emailsRes.json();
+        const primary = emails.find((e) => e.primary && e.verified) || emails.find((e) => e.verified);
+        email = primary?.email;
+      }
+    }
+    if (!email) email = `${profile.id}+${profile.login}@users.noreply.github.com`;
+
+    const user = await findOrCreateUserByGithub(String(profile.id), email.toLowerCase());
+    setSessionCookie(res, user);
+    res.redirect("/");
+  } catch (err) {
+    console.error(err);
+    res.redirect("/?auth_error=github_failed");
   }
 });
 
