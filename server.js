@@ -1,12 +1,10 @@
 import express from "express";
 import path from "node:path";
-import { randomUUID, randomInt } from "node:crypto";
+import { randomUUID, randomInt, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import cookieParser from "cookie-parser";
 import jwt from "jsonwebtoken";
 import pg from "pg";
-import nodemailer from "nodemailer";
-import { OAuth2Client } from "google-auth-library";
 
 const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,8 +20,10 @@ const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN;
 const SESSION_SECRET = process.env.SESSION_SECRET || "dev-secret-change-me-in-production";
 const DATABASE_URL = process.env.DATABASE_URL;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GMAIL_USER = process.env.GMAIL_USER;
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const APP_URL = process.env.APP_URL || "https://lsplash-ai.onrender.com";
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM || "Lsplash AI <onboarding@resend.dev>";
 const COOKIE_NAME = "lsplash_session";
 
 app.use(express.json({ limit: "1mb" }));
@@ -135,33 +135,100 @@ async function findOrCreateUserByGoogle(googleId, email) {
 
 /* -------------------------------------------------------------- email --- */
 
-const mailer =
-  GMAIL_USER && GMAIL_APP_PASSWORD
-    ? nodemailer.createTransport({ service: "gmail", auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD } })
-    : null;
-
 async function sendOtpEmail(email, code) {
-  if (!mailer) {
+  if (!RESEND_API_KEY) {
     // No mailer configured yet — log it so you can still test the flow locally.
     console.log(`[dev only] OTP for ${email}: ${code}`);
     return;
   }
-  await mailer.sendMail({
-    from: `Lsplash AI <${GMAIL_USER}>`,
-    to: email,
-    subject: `${code} is your Lsplash AI code`,
-    text: `Your Lsplash AI verification code is ${code}. It expires in 10 minutes.`,
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${RESEND_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM,
+      to: email,
+      subject: `${code} is your Lsplash AI code`,
+      text: `Your Lsplash AI verification code is ${code}. It expires in 10 minutes.`,
+    }),
   });
+
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Resend error ${res.status}: ${detail}`);
+  }
 }
 
 /* ------------------------------------------------------------- google --- */
-
-const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
-
-/* ---------------------------------------------------------- auth routes -- */
+/**
+ * Plain redirect-based OAuth — no popups, no postMessage, no FedCM.
+ * The browser fully navigates to Google and back, which works everywhere.
+ */
+const GOOGLE_REDIRECT_URI = `${APP_URL}/auth/google/callback`;
+const googleStates = new Map(); // short-lived CSRF state -> expiry
 
 app.get("/api/config", (_req, res) => {
-  res.json({ googleClientId: GOOGLE_CLIENT_ID || null, dbConfigured: Boolean(pool) });
+  res.json({ googleEnabled: Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET), dbConfigured: Boolean(pool) });
+});
+
+app.get("/auth/google", (req, res) => {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+    return res.status(503).send("Google sign-in isn't configured yet.");
+  }
+  const state = randomBytes(16).toString("hex");
+  googleStates.set(state, Date.now() + 5 * 60 * 1000);
+
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    response_type: "code",
+    scope: "openid email",
+    state,
+    prompt: "select_account",
+  });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+
+app.get("/auth/google/callback", async (req, res) => {
+  const { code, state, error } = req.query;
+
+  if (error) return res.redirect(`/?auth_error=${encodeURIComponent(String(error))}`);
+  if (!state || !googleStates.has(String(state))) return res.redirect("/?auth_error=bad_state");
+  googleStates.delete(String(state));
+
+  if (!pool) return res.redirect("/?auth_error=no_database");
+
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: GOOGLE_REDIRECT_URI,
+        grant_type: "authorization_code",
+      }),
+    });
+    if (!tokenRes.ok) throw new Error(`Token exchange failed: ${await tokenRes.text()}`);
+    const tokens = await tokenRes.json();
+
+    const userRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { authorization: `Bearer ${tokens.access_token}` },
+    });
+    if (!userRes.ok) throw new Error("Could not fetch Google profile.");
+    const profile = await userRes.json();
+
+    const user = await findOrCreateUserByGoogle(profile.sub, profile.email.toLowerCase());
+    setSessionCookie(res, user);
+    res.redirect("/");
+  } catch (err) {
+    console.error(err);
+    res.redirect("/?auth_error=google_failed");
+  }
 });
 
 app.get("/api/auth/me", (req, res) => {
@@ -187,7 +254,7 @@ app.post("/api/auth/otp/request", async (req, res) => {
       expiresAt,
     ]);
     await sendOtpEmail(email, code);
-    res.json({ ok: true, devHint: mailer ? undefined : "Mailer not configured — check server logs for the code." });
+    res.json({ ok: true, devHint: RESEND_API_KEY ? undefined : "Mailer not configured — check server logs for the code." });
   } catch (err) {
     console.error(err);
     res.status(502).json({ error: "Could not send the code. Try again." });
@@ -213,23 +280,6 @@ app.post("/api/auth/otp/verify", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Sign-in failed. Try again." });
-  }
-});
-
-app.post("/api/auth/google", async (req, res) => {
-  const credential = req.body?.credential;
-  if (!googleClient) return res.status(503).json({ error: "Google sign-in isn't configured yet." });
-  if (!pool) return res.status(503).json({ error: "Sign-in isn't set up yet — add DATABASE_URL." });
-
-  try {
-    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
-    const payload = ticket.getPayload();
-    const user = await findOrCreateUserByGoogle(payload.sub, payload.email.toLowerCase());
-    setSessionCookie(res, user);
-    res.json({ user: { email: user.email } });
-  } catch (err) {
-    console.error(err);
-    res.status(401).json({ error: "Google sign-in failed." });
   }
 });
 
