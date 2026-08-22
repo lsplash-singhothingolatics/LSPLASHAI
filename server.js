@@ -418,11 +418,13 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       },
       body: JSON.stringify({
         model: CHAT_MODEL,
-        max_tokens: 1024,
+        max_tokens: 2048,
         system:
-          "You are the assistant inside Lsplash AI, an image generation studio. " +
-          "Help people sharpen their image prompts and answer questions about the app. " +
-          "Keep replies short and concrete.",
+          "You are the AI assistant inside Lsplash AI. You help with two things: " +
+          "(1) sharpening image-generation prompts, and (2) answering general questions " +
+          "and coding help. When you write code, always use fenced Markdown code blocks " +
+          "with the language tag (e.g. ```js). Be clear and concise, and use Markdown " +
+          "formatting (headings, lists, bold) where it aids readability.",
         messages: messages.slice(-20).map((m) => ({
           role: m.role === "assistant" ? "assistant" : "user",
           content: String(m.content ?? "").slice(0, 4000),
@@ -454,7 +456,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
 function pollinationsUrl(prompt, seed) {
   const encoded = encodeURIComponent(prompt);
-  return `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&nologo=true`;
+  // safe=true turns on Pollinations' own NSFW filter as a second layer.
+  return `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&nologo=true&safe=true`;
 }
 
 async function generateWithReplicate(prompt) {
@@ -476,11 +479,57 @@ async function generateWithReplicate(prompt) {
   return output;
 }
 
+/* ---------------------------------------------------- content safety ---- */
+/**
+ * Blocks sexual, nude, and minor-related prompts before they reach the image
+ * provider. This is a first line of defense — a blocklist, normalized to catch
+ * spacing/leetspeak tricks. It won't catch everything, but it stops the obvious
+ * cases. For stronger coverage, add a moderation API check on top of this.
+ */
+const BLOCKED_PATTERNS = [
+  /\bn[s5]fw\b/,
+  /\bnude?s?\b/, /\bnaked\b/, /\btopless\b/, /\bbottomless\b/,
+  /\bporn/, /\bxxx\b/, /\bhentai\b/, /\berotic/, /\bfetish/,
+  /\bsex(y|ual)?\b/, /\bnsfl\b/, /\bboobs?\b/, /\bbreasts?\b/,
+  /\bnipple/, /\bcleavage\b/, /\bgenital/, /\bvagina\b/, /\bpenis\b/,
+  /\bass\b/, /\bbutt(ocks)?\b/, /\bthong\b/, /\blingerie\b/,
+  /\bbikini\s+(model|girl|woman|babe|body)\b/, /\b(model|girl|woman|babe)\s+in\s+(a\s+)?bikini\b/,
+  /\bcum\b/, /\bhorny\b/, /\borgasm/, /\bmasturbat/, /\bpussy\b/,
+  /\bslut\b/, /\bwhore\b/, /\bstrip(per|ping)?\b/, /\bonlyfans\b/,
+  /\bunderwear\b/, /\bpanties\b/, /\bseductive\b/, /\bprovocative\b/,
+  // minors + any sexual/suggestive context is hard-blocked
+  /\b(child|kid|minor|teen|preteen|underage|loli|shota|schoolgirl|little girl|little boy)\b/,
+];
+
+function normalizeForModeration(text) {
+  let t = text
+    .toLowerCase()
+    .replace(/[!|1]/g, "i")
+    .replace(/[3]/g, "e")
+    .replace(/[0]/g, "o")
+    .replace(/[4@]/g, "a")
+    .replace(/[5$]/g, "s")
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Collapse letter-by-letter spacing evasions like "n u d e" -> "nude".
+  const despaced = t.replace(/\b(?:[a-z] ){2,}[a-z]\b/g, (m) => m.replace(/ /g, ""));
+  return `${t} ${despaced}`;
+}
+
+function isPromptBlocked(prompt) {
+  const normalized = normalizeForModeration(prompt);
+  return BLOCKED_PATTERNS.some((re) => re.test(normalized));
+}
+
 app.post("/api/generate", requireAuth, async (req, res) => {
   const prompt = String(req.body?.prompt ?? "").trim();
 
   if (!prompt) return res.status(400).json({ error: "Write a prompt first." });
   if (prompt.length > 800) return res.status(400).json({ error: "Keep prompts under 800 characters." });
+  if (isPromptBlocked(prompt)) {
+    return res.status(400).json({ error: "That prompt isn't allowed. Keep it safe-for-work." });
+  }
 
   try {
     const seed = Math.floor(Math.random() * 1_000_000);
